@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import os
+import sys
 import subprocess
 import zipfile
 from dataclasses import dataclass, field
@@ -11,6 +12,7 @@ from typing import Iterable, Optional
 import mistune
 from docx import Document
 from docx.enum.section import WD_SECTION
+from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT, WD_TAB_LEADER
 from docx.oxml import OxmlElement
 from docx.oxml.ns import nsdecls, qn
@@ -30,8 +32,87 @@ INLINE_MATH_PLACEHOLDER_PATTERN = re.compile(r"@@MI(\d+)@@")
 H1_PATTERN = re.compile(r"(?m)^#\s+(.+)\s*$")
 TAG_PATTERN = re.compile(r"\\tag\{([^}]+)\}")
 CODE_LINE_NO_PATTERN = re.compile(r"^\s*\d+→(?: (?=\S))?")
+REFERENCE_ITEM_PATTERN = re.compile(r"(?m)^\[(\d+)\]\s*")
+_MARKDOWN_REF_HEADING_PATTERN = re.compile(r"(?m)^#\s*(参考文献|References)\s*$")
+_MARKDOWN_H1_PATTERN = re.compile(r"(?m)^#\s+.+$")
+_MARKDOWN_CITATION_PATTERN = re.compile(r"\[(\s*\d+(?:\s*[-–]\s*\d+)?(?:\s*,\s*\d+(?:\s*[-–]\s*\d+)?)*)\]")
 
 _RECOVERY_XML_PARSER = etree.XMLParser(recover=True)
+
+
+def _collect_markdown_issues(raw: str) -> tuple[list[str], list[str]]:
+    def _line_of(pos: int) -> int:
+        return raw.count("\n", 0, pos) + 1
+
+    def _parse_nums(cite: str) -> list[int]:
+        normalized = cite.replace("，", ",").replace("—", "-").replace("–", "-")
+        parts = [p.strip() for p in normalized.split(",") if p.strip()]
+        out: list[int] = []
+        for part in parts:
+            if "-" in part:
+                a_s, b_s = [x.strip() for x in part.split("-", 1)]
+                try:
+                    a = int(a_s)
+                    b = int(b_s)
+                except ValueError:
+                    continue
+                if a > b:
+                    a, b = b, a
+                out.extend(list(range(a, b + 1)))
+            else:
+                try:
+                    out.append(int(part))
+                except ValueError:
+                    continue
+        return out
+
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    ref_heading = _MARKDOWN_REF_HEADING_PATTERN.search(raw)
+    if ref_heading:
+        start = ref_heading.end()
+        next_h1 = _MARKDOWN_H1_PATTERN.search(raw, start)
+        end = next_h1.start() if next_h1 else len(raw)
+        block = raw[start:end]
+        lines = block.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        has_any = False
+        ref_nums_in_list: list[int] = []
+        for idx, line_text in enumerate(lines, start=_line_of(start)):
+            if not line_text.strip():
+                continue
+            has_any = True
+            m = re.match(r"^\[(\d+)\]\s+", line_text)
+            if not m:
+                errors.append(f"line {idx}: 参考文献条目必须以行首“[数字] ”开头（示例：[1] ...），当前为：{line_text.strip()[:60]}")
+            else:
+                ref_nums_in_list.append(int(m.group(1)))
+        if not has_any:
+            errors.append(f"line {_line_of(ref_heading.start())}: 参考文献章节为空，无法建立正文引用跳转。")
+        else:
+            cited_order: list[int] = []
+            cited_seen: set[int] = set()
+            text_before_refs = raw[: ref_heading.start()]
+            for m in _MARKDOWN_CITATION_PATTERN.finditer(text_before_refs):
+                nums = _parse_nums(m.group(1))
+                for n in nums:
+                    if n not in cited_seen:
+                        cited_seen.add(n)
+                        cited_order.append(n)
+
+            if cited_order:
+                expected = [n for n in ref_nums_in_list if n in cited_seen]
+                if expected and cited_order != expected:
+                    warnings.append(
+                        "文献引用顺序与参考文献列表顺序不一致："
+                        f"正文首次出现顺序={cited_order[:20]}；参考文献列表对应顺序={expected[:20]}（请自行调整正文引用或参考文献列表顺序）"
+                    )
+
+            missing = sorted(set(cited_order) - set(ref_nums_in_list))
+            if missing:
+                warnings.append(f"正文引用了参考文献列表中不存在的编号：{missing}（请补充参考文献条目或修正引用编号）")
+
+    return errors, warnings
 
 
 @dataclass(frozen=True)
@@ -360,9 +441,77 @@ def _render_text(
     east_asia: str = "宋体",
     enable_citation_superscript: bool = True,
     table_number_map: Optional[dict[int, int]] = None,
+    citation_bookmark_prefix: Optional[str] = None,
+    citation_ascii_font: str = "Times New Roman",
 ) -> None:
     citation_pattern = re.compile(r"\[(\s*\d+(?:\s*[-–]\s*\d+)?(?:\s*,\s*\d+(?:\s*[-–]\s*\d+)?)*)\]")
     table_ref_pattern = re.compile(r"表\s*(\d+)")
+
+    def _normalize_citation_ranges(cite: str) -> list[tuple[int, int]]:
+        normalized = cite.replace("，", ",").replace("—", "-").replace("–", "-")
+        parts = [p.strip() for p in normalized.split(",") if p.strip()]
+        nums: set[int] = set()
+        for part in parts:
+            if "-" in part:
+                a_s, b_s = [x.strip() for x in part.split("-", 1)]
+                if not a_s or not b_s:
+                    continue
+                try:
+                    a = int(a_s)
+                    b = int(b_s)
+                except ValueError:
+                    continue
+                if a > b:
+                    a, b = b, a
+                for x in range(a, b + 1):
+                    nums.add(x)
+            else:
+                try:
+                    nums.add(int(part))
+                except ValueError:
+                    continue
+        if not nums:
+            return []
+        ordered = sorted(nums)
+        out: list[tuple[int, int]] = []
+        start = prev = ordered[0]
+        for x in ordered[1:]:
+            if x == prev + 1:
+                prev = x
+                continue
+            out.append((start, prev))
+            start = prev = x
+        out.append((start, prev))
+        return out
+
+    def _add_hyperlink_to_bookmark(paragraph, *, bookmark_name: str, text: str) -> None:
+        hyperlink = OxmlElement("w:hyperlink")
+        hyperlink.set(qn("w:anchor"), bookmark_name)
+        hyperlink.set(qn("w:history"), "1")
+
+        r = OxmlElement("w:r")
+        r_pr = OxmlElement("w:rPr")
+
+        r_fonts = OxmlElement("w:rFonts")
+        r_fonts.set(qn("w:ascii"), citation_ascii_font)
+        r_fonts.set(qn("w:hAnsi"), citation_ascii_font)
+        r_fonts.set(qn("w:eastAsia"), east_asia)
+        r_pr.append(r_fonts)
+
+        vert = OxmlElement("w:vertAlign")
+        vert.set(qn("w:val"), "superscript")
+        r_pr.append(vert)
+
+        u = OxmlElement("w:u")
+        u.set(qn("w:val"), "none")
+        r_pr.append(u)
+
+        r.append(r_pr)
+        t = OxmlElement("w:t")
+        t.text = text
+        r.append(t)
+        hyperlink.append(r)
+        paragraph._p.append(hyperlink)
 
     for kind, value in _iter_text_with_placeholders(text):
         if kind == "text":
@@ -392,11 +541,44 @@ def _render_text(
                         _apply_run_fonts(run, east_asia=east_asia)
 
                 cite = match.group(1).strip()
-                cite_run = paragraph.add_run(f"［{cite}］")
-                cite_run.bold = bold or None
-                cite_run.italic = (italic and allow_italic) or None
-                cite_run.font.superscript = True
-                _apply_run_fonts(cite_run, east_asia=east_asia)
+                if citation_bookmark_prefix:
+                    ranges = _normalize_citation_ranges(cite)
+                    if not ranges:
+                        cite_run = paragraph.add_run(f"［{cite}］")
+                        cite_run.bold = bold or None
+                        cite_run.italic = (italic and allow_italic) or None
+                        cite_run.font.superscript = True
+                        _apply_run_fonts(cite_run, east_asia=east_asia, ascii_font=citation_ascii_font)
+                        cursor = end
+                        continue
+                    open_run = paragraph.add_run("［")
+                    open_run.bold = bold or None
+                    open_run.italic = (italic and allow_italic) or None
+                    open_run.font.superscript = True
+                    _apply_run_fonts(open_run, east_asia=east_asia, ascii_font=citation_ascii_font)
+
+                    for idx, (a, b) in enumerate(ranges):
+                        if idx > 0:
+                            comma = paragraph.add_run(",")
+                            comma.bold = bold or None
+                            comma.italic = (italic and allow_italic) or None
+                            comma.font.superscript = True
+                            _apply_run_fonts(comma, east_asia=east_asia, ascii_font=citation_ascii_font)
+
+                        label = f"{a}-{b}" if a != b else str(a)
+                        _add_hyperlink_to_bookmark(paragraph, bookmark_name=f"{citation_bookmark_prefix}{a}", text=label)
+
+                    close_run = paragraph.add_run("］")
+                    close_run.bold = bold or None
+                    close_run.italic = (italic and allow_italic) or None
+                    close_run.font.superscript = True
+                    _apply_run_fonts(close_run, east_asia=east_asia, ascii_font=citation_ascii_font)
+                else:
+                    cite_run = paragraph.add_run(f"［{cite}］")
+                    cite_run.bold = bold or None
+                    cite_run.italic = (italic and allow_italic) or None
+                    cite_run.font.superscript = True
+                    _apply_run_fonts(cite_run, east_asia=east_asia)
                 cursor = end
 
             if cursor < len(value):
@@ -424,6 +606,8 @@ def _render_inlines(
     enable_citation_superscript: bool = True,
     table_number_map: Optional[dict[int, int]] = None,
     base_path: Path = Path("."),
+    citation_bookmark_prefix: Optional[str] = None,
+    citation_ascii_font: str = "Times New Roman",
 ) -> None:
     for node in inlines:
         node_type = node.get("type")
@@ -438,6 +622,8 @@ def _render_inlines(
                 east_asia=east_asia,
                 enable_citation_superscript=enable_citation_superscript,
                 table_number_map=table_number_map,
+                citation_bookmark_prefix=citation_bookmark_prefix,
+                citation_ascii_font=citation_ascii_font,
             )
         elif node_type == "strong":
             _render_inlines(
@@ -450,6 +636,8 @@ def _render_inlines(
                 east_asia=east_asia,
                 enable_citation_superscript=enable_citation_superscript,
                 table_number_map=table_number_map,
+                citation_bookmark_prefix=citation_bookmark_prefix,
+                citation_ascii_font=citation_ascii_font,
             )
         elif node_type == "emphasis":
             _render_inlines(
@@ -462,6 +650,8 @@ def _render_inlines(
                 east_asia=east_asia,
                 enable_citation_superscript=enable_citation_superscript,
                 table_number_map=table_number_map,
+                citation_bookmark_prefix=citation_bookmark_prefix,
+                citation_ascii_font=citation_ascii_font,
             )
         elif node_type == "codespan":
             run = paragraph.add_run(node.get("text", ""))
@@ -480,6 +670,8 @@ def _render_inlines(
                 enable_citation_superscript=enable_citation_superscript,
                 table_number_map=table_number_map,
                 base_path=base_path,
+                citation_bookmark_prefix=citation_bookmark_prefix,
+                citation_ascii_font=citation_ascii_font,
             )
         elif node_type == "image":
             src = node.get("src") or ""
@@ -514,6 +706,8 @@ def _render_inlines(
                     enable_citation_superscript=enable_citation_superscript,
                     table_number_map=table_number_map,
                     base_path=base_path,
+                    citation_bookmark_prefix=citation_bookmark_prefix,
+                    citation_ascii_font=citation_ascii_font,
                 )
             elif "text" in node:
                 _render_text(
@@ -526,6 +720,8 @@ def _render_inlines(
                     east_asia=east_asia,
                     enable_citation_superscript=enable_citation_superscript,
                     table_number_map=table_number_map,
+                    citation_bookmark_prefix=citation_bookmark_prefix,
+                    citation_ascii_font=citation_ascii_font,
                 )
 
 
@@ -987,6 +1183,8 @@ def _render_table(
     *,
     enable_citation_superscript: bool = True,
     table_number_map: Optional[dict[int, int]] = None,
+    citation_bookmark_prefix: Optional[str] = None,
+    citation_ascii_font: str = "Times New Roman",
 ) -> None:
     table_head = None
     table_body = None
@@ -1043,6 +1241,8 @@ def _render_table(
                     prepared,
                     enable_citation_superscript=enable_citation_superscript,
                     table_number_map=table_number_map,
+                    citation_bookmark_prefix=citation_bookmark_prefix,
+                    citation_ascii_font=citation_ascii_font,
                 )
             else:
                 _render_inlines(
@@ -1051,6 +1251,8 @@ def _render_table(
                     prepared,
                     enable_citation_superscript=enable_citation_superscript,
                     table_number_map=table_number_map,
+                    citation_bookmark_prefix=citation_bookmark_prefix,
+                    citation_ascii_font=citation_ascii_font,
                 )
             
             # Make header bold
@@ -1078,6 +1280,8 @@ def _render_table(
                     prepared,
                     enable_citation_superscript=enable_citation_superscript,
                     table_number_map=table_number_map,
+                    citation_bookmark_prefix=citation_bookmark_prefix,
+                    citation_ascii_font=citation_ascii_font,
                 )
             else:
                 _render_inlines(
@@ -1086,6 +1290,8 @@ def _render_table(
                     prepared,
                     enable_citation_superscript=enable_citation_superscript,
                     table_number_map=table_number_map,
+                    citation_bookmark_prefix=citation_bookmark_prefix,
+                    citation_ascii_font=citation_ascii_font,
                 )
  
     _set_table_three_line(table, has_header=bool(head_cells))
@@ -1100,6 +1306,8 @@ def _render_list(
     enable_citation_superscript: bool = True,
     table_number_map: Optional[dict[int, int]] = None,
     base_path: Path = Path("."),
+    citation_bookmark_prefix: Optional[str] = None,
+    citation_ascii_font: str = "Times New Roman",
 ) -> None:
     ordered = bool(token.get("ordered"))
     if ordered:
@@ -1119,6 +1327,8 @@ def _render_list(
                         enable_citation_superscript=enable_citation_superscript,
                         table_number_map=table_number_map,
                         base_path=base_path,
+                        citation_bookmark_prefix=citation_bookmark_prefix,
+                        citation_ascii_font=citation_ascii_font,
                     )
                 else:
                     _render_blocks(doc, [child], prepared, base_path=base_path)
@@ -1136,6 +1346,8 @@ def _render_list(
                     enable_citation_superscript=enable_citation_superscript,
                     table_number_map=table_number_map,
                     base_path=base_path,
+                    citation_bookmark_prefix=citation_bookmark_prefix,
+                    citation_ascii_font=citation_ascii_font,
                 )
             else:
                 _render_blocks(doc, [child], prepared, base_path=base_path)
@@ -1150,6 +1362,8 @@ def _render_paragraph(
     table_number_map: Optional[dict[int, int]] = None,
     base_path: Path = Path("."),
     config: WordFormatConfig = DEFAULT_WORD_FORMAT,
+    citation_bookmark_prefix: Optional[str] = None,
+    citation_ascii_font: str = "Times New Roman",
 ) -> None:
     inlines = token.get("children", [])
     plain = _extract_plain_text(inlines, prepared).strip()
@@ -1175,7 +1389,73 @@ def _render_paragraph(
         enable_citation_superscript=enable_citation_superscript,
         table_number_map=table_number_map,
         base_path=base_path,
+        citation_bookmark_prefix=citation_bookmark_prefix,
+        citation_ascii_font=citation_ascii_font,
     )
+
+
+def _split_reference_items(raw_text: str) -> list[tuple[str, str]]:
+    text = raw_text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    matches = list(REFERENCE_ITEM_PATTERN.finditer(text))
+    if not matches:
+        return []
+    items: list[tuple[str, str]] = []
+    for idx, m in enumerate(matches):
+        start = m.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        no = m.group(1)
+        body = text[start:end].strip()
+        body = re.sub(r"\s+", " ", body).strip()
+        items.append((no, body))
+    return items
+
+
+def _render_references_from_inlines(
+    doc: Document,
+    inlines: list[dict],
+    prepared: PreparedMarkdown,
+    *,
+    ctx: RenderContext,
+    config: WordFormatConfig,
+) -> None:
+    raw_text = _extract_raw_text(inlines)
+    items = _split_reference_items(raw_text)
+    if not items:
+        p = doc.add_paragraph()
+        p.paragraph_format.first_line_indent = Cm(0)
+        p.paragraph_format.left_indent = Cm(0)
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after = Pt(0)
+        p.paragraph_format.line_spacing = config.body_line_spacing
+        _render_inlines(
+            p,
+            inlines,
+            prepared,
+            enable_citation_superscript=False,
+            table_number_map=None,
+        )
+        return
+
+    hang_cm = float(config.references_hanging_indent_cm)
+    for no, body in items:
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after = Pt(0)
+        p.paragraph_format.line_spacing = config.body_line_spacing
+        p.paragraph_format.left_indent = Cm(hang_cm)
+        p.paragraph_format.first_line_indent = Cm(-hang_cm)
+        p.paragraph_format.tab_stops.add_tab_stop(Cm(hang_cm / 2.0), alignment=WD_TAB_ALIGNMENT.CENTER)
+        p.paragraph_format.tab_stops.add_tab_stop(Cm(hang_cm), alignment=WD_TAB_ALIGNMENT.LEFT)
+        _add_bookmark(p, name=f"ref_{no}", bookmark_id=ctx.next_bookmark_id)
+        ctx.next_bookmark_id += 1
+        _render_text(
+            p,
+            f"\t[{no}]\t{body}",
+            prepared,
+            enable_citation_superscript=False,
+            table_number_map=None,
+            east_asia=config.body_east_asia_font,
+        )
 
 
 def _render_heading(doc: Document, token: dict) -> None:
@@ -1195,8 +1475,47 @@ def _add_bookmark(paragraph, *, name: str, bookmark_id: int) -> None:
     paragraph._p.append(end)
 
 
-def _add_pageref_field(paragraph, bookmark_name: str, *, east_asia: str) -> None:
-    _add_field_run(paragraph, f" PAGEREF {bookmark_name} \\h ", east_asia=east_asia)
+def _add_hyperlink_to_bookmark(
+    paragraph,
+    *,
+    bookmark_name: str,
+    text: str,
+    east_asia: str,
+    ascii_font: str,
+    bold: bool = False,
+) -> None:
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("w:anchor"), bookmark_name)
+    hyperlink.set(qn("w:history"), "1")
+
+    r = OxmlElement("w:r")
+    r_pr = OxmlElement("w:rPr")
+
+    r_fonts = OxmlElement("w:rFonts")
+    r_fonts.set(qn("w:ascii"), ascii_font)
+    r_fonts.set(qn("w:hAnsi"), ascii_font)
+    r_fonts.set(qn("w:eastAsia"), east_asia)
+    r_pr.append(r_fonts)
+
+    if bold:
+        b = OxmlElement("w:b")
+        r_pr.append(b)
+
+    u = OxmlElement("w:u")
+    u.set(qn("w:val"), "none")
+    r_pr.append(u)
+
+    r.append(r_pr)
+    t = OxmlElement("w:t")
+    t.text = text
+    r.append(t)
+    hyperlink.append(r)
+    paragraph._p.append(hyperlink)
+
+
+def _add_pageref_field(paragraph, bookmark_name: str, *, east_asia: str, bold: bool = False) -> None:
+    run = _add_field_run(paragraph, f" PAGEREF {bookmark_name} \\h ", east_asia=east_asia)
+    run.bold = bold or None
 
 
 def _render_blocks(
@@ -1235,6 +1554,8 @@ def _render_blocks(
                 ctx.seen_first_h1 = True
             if ctx and level == 2:
                 _add_blank_line(doc, ctx)
+            if ctx and level in (3, 4):
+                _add_blank_line(doc, ctx)
             heading_level = min(level, 4)
             p = doc.add_heading("", level=heading_level)
             if ctx:
@@ -1253,10 +1574,12 @@ def _render_blocks(
                 enable_citation_superscript=True,
                 table_number_map=(ctx.table_number_map if ctx else None),
                 base_path=base_path,
+                citation_bookmark_prefix=("ref_" if (ctx and not ctx.in_references) else None),
+                citation_ascii_font=(heading_config.body_ascii_font if ctx else "Times New Roman"),
             )
-            if level in (1, 2):
+            if level in (1, 2, 3, 4):
                 _add_blank_line(doc, ctx)
-            if ctx and level in (1, 2) and ctx.toc_pos < len(ctx.toc_entries):
+            if ctx and level in (1, 2, 3, 4) and ctx.toc_pos < len(ctx.toc_entries):
                 entry = ctx.toc_entries[ctx.toc_pos]
                 if entry.level == level:
                     _add_bookmark(p, name=entry.bookmark_name, bookmark_id=ctx.next_bookmark_id)
@@ -1268,7 +1591,15 @@ def _render_blocks(
         if t == "table":
             enable = False if (ctx and ctx.in_references) else True
             table_map = ctx.table_number_map if ctx else None
-            _render_table(doc, token, prepared, enable_citation_superscript=enable, table_number_map=table_map)
+            _render_table(
+                doc,
+                token,
+                prepared,
+                enable_citation_superscript=enable,
+                table_number_map=table_map,
+                citation_bookmark_prefix=("ref_" if ctx else None),
+                citation_ascii_font=(ctx.config.body_ascii_font if ctx else "Times New Roman"),
+            )
             if ctx:
                 ctx.last_was_page_break = False
                 ctx.last_was_blank_line = False
@@ -1279,6 +1610,9 @@ def _render_blocks(
             continue
 
         if t == "blank_line":
+            if ctx and ctx.in_references:
+                i += 1
+                continue
             if ctx and ctx.pending_table_no is not None:
                 i += 1
                 continue
@@ -1293,6 +1627,19 @@ def _render_blocks(
         if t == "paragraph":
             enable = False if (ctx and ctx.in_references) else True
             table_map = ctx.table_number_map if ctx else None
+            if ctx and ctx.in_references:
+                _render_references_from_inlines(
+                    doc,
+                    token.get("children", []),
+                    prepared,
+                    ctx=ctx,
+                    config=ctx.config,
+                )
+                ctx.last_was_page_break = False
+                ctx.last_was_blank_line = False
+                ctx.last_token_was_table = False
+                i += 1
+                continue
             if ctx and ctx.pending_table_no is not None:
                 inlines = token.get("children", [])
                 plain = _extract_plain_text(inlines, prepared).strip()
@@ -1370,6 +1717,8 @@ def _render_blocks(
                         enable_citation_superscript=enable,
                         table_number_map=table_map,
                         base_path=base_path,
+                        citation_bookmark_prefix=("ref_" if ctx else None),
+                        citation_ascii_font=(ctx.config.body_ascii_font if ctx else "Times New Roman"),
                     )
                     _add_blank_line(doc, ctx)
 
@@ -1387,6 +1736,8 @@ def _render_blocks(
                 table_number_map=table_map,
                 base_path=base_path,
                 config=(ctx.config if ctx else DEFAULT_WORD_FORMAT),
+                citation_bookmark_prefix=("ref_" if ctx else None),
+                citation_ascii_font=((ctx.config.body_ascii_font if ctx else DEFAULT_WORD_FORMAT.body_ascii_font) if ctx else "Times New Roman"),
             )
             if ctx:
                 ctx.last_was_page_break = False
@@ -1398,7 +1749,36 @@ def _render_blocks(
         if t == "list":
             enable = False if (ctx and ctx.in_references) else True
             table_map = ctx.table_number_map if ctx else None
-            _render_list(doc, token, prepared, enable_citation_superscript=enable, table_number_map=table_map, base_path=base_path)
+            if ctx and ctx.in_references:
+                for item in token.get("children", []):
+                    for child in item.get("children", []):
+                        if child.get("type") == "block_text":
+                            _render_references_from_inlines(
+                                doc,
+                                child.get("children", []),
+                                prepared,
+                                ctx=ctx,
+                                config=ctx.config,
+                            )
+                        else:
+                            _render_blocks(doc, [child], prepared, ctx=ctx, base_path=base_path)
+                if ctx:
+                    ctx.last_was_page_break = False
+                    ctx.last_was_blank_line = False
+                    ctx.pending_table_no = None
+                    ctx.last_token_was_table = False
+                i += 1
+                continue
+            _render_list(
+                doc,
+                token,
+                prepared,
+                enable_citation_superscript=enable,
+                table_number_map=table_map,
+                base_path=base_path,
+                citation_bookmark_prefix=("ref_" if ctx else None),
+                citation_ascii_font=(ctx.config.body_ascii_font if ctx else "Times New Roman"),
+            )
             if ctx:
                 ctx.last_was_page_break = False
                 ctx.last_was_blank_line = False
@@ -1408,10 +1788,28 @@ def _render_blocks(
             continue
 
         if t == "block_text":
-            p = doc.add_paragraph()
             enable = False if (ctx and ctx.in_references) else True
             table_map = ctx.table_number_map if ctx else None
-            _render_inlines(p, token.get("children", []), prepared, enable_citation_superscript=enable, table_number_map=table_map, base_path=base_path)
+            if ctx and ctx.in_references:
+                _render_references_from_inlines(
+                    doc,
+                    token.get("children", []),
+                    prepared,
+                    ctx=ctx,
+                    config=ctx.config,
+                )
+            else:
+                p = doc.add_paragraph()
+                _render_inlines(
+                    p,
+                    token.get("children", []),
+                    prepared,
+                    enable_citation_superscript=enable,
+                    table_number_map=table_map,
+                    base_path=base_path,
+                    citation_bookmark_prefix=("ref_" if ctx else None),
+                    citation_ascii_font=(ctx.config.body_ascii_font if ctx else "Times New Roman"),
+                )
             if ctx:
                 ctx.last_was_page_break = False
                 ctx.last_was_blank_line = False
@@ -1528,10 +1926,18 @@ def _configure_document_styles(doc: Document, *, config: WordFormatConfig) -> No
         ("TOC 1", config.toc_level1_east_asia_font, config.toc_level1_size_pt),
         ("TOC 2", config.toc_level2_east_asia_font, config.toc_level2_size_pt),
         ("TOC 3", config.toc_level3_east_asia_font, config.toc_level3_size_pt),
+        ("TOC 4", config.toc_level4_east_asia_font, config.toc_level3_size_pt),
     ]:
-        if toc_style in doc.styles:
-            _set_style_font(doc.styles[toc_style], east_asia=east_asia, ascii_font=config.toc_level_font_ascii, size_pt=size, bold=False)
-            _set_style_paragraph(doc.styles[toc_style], line_spacing=config.body_line_spacing, space_before_pt=0, space_after_pt=0, first_line_indent_cm=None)
+        if toc_style not in doc.styles:
+            doc.styles.add_style(toc_style, WD_STYLE_TYPE.PARAGRAPH)
+        _set_style_font(
+            doc.styles[toc_style],
+            east_asia=east_asia,
+            ascii_font=config.toc_level_font_ascii,
+            size_pt=size,
+            bold=False,
+        )
+        _set_style_paragraph(doc.styles[toc_style], line_spacing=config.body_line_spacing, space_before_pt=0, space_after_pt=0, first_line_indent_cm=None)
 
 
 def _configure_section_layout(section, *, config: WordFormatConfig) -> None:
@@ -1566,7 +1972,7 @@ def _set_paragraph_bottom_border(paragraph, *, config: WordFormatConfig) -> None
     p_pr.append(p_bdr)
 
 
-def _add_field_run(paragraph, instr: str, *, east_asia: str = "宋体") -> None:
+def _add_field_run(paragraph, instr: str, *, east_asia: str = "宋体"):
     run = paragraph.add_run()
     _apply_run_fonts(run, east_asia=east_asia)
     run.italic = False
@@ -1590,6 +1996,7 @@ def _add_field_run(paragraph, instr: str, *, east_asia: str = "宋体") -> None:
     fld_end = OxmlElement("w:fldChar")
     fld_end.set(qn("w:fldCharType"), "end")
     run._r.append(fld_end)
+    return run
 
 
 def _setup_header_footer(
@@ -1650,20 +2057,38 @@ def _add_manual_toc(doc: Document, section, toc_entries: list[TocEntry], *, conf
     _add_blank_line(doc)
     tab_pos_cm = _compute_toc_tab_pos_cm(section)
     for entry in toc_entries:
-        toc_east_asia = config.toc_level1_east_asia_font if entry.level == 1 else config.toc_level2_east_asia_font
-        style_name = "TOC 1" if entry.level == 1 else "TOC 2"
+        toc_east_asia = (
+            config.toc_level1_east_asia_font
+            if entry.level == 1
+            else config.toc_level2_east_asia_font
+            if entry.level == 2
+            else config.toc_level3_east_asia_font
+            if entry.level == 3
+            else config.toc_level4_east_asia_font
+        )
+        style_name = "TOC 1" if entry.level == 1 else "TOC 2" if entry.level == 2 else "TOC 3" if entry.level == 3 else "TOC 4"
         p = doc.add_paragraph(style=style_name if style_name in doc.styles else None)
         if entry.level == 2:
             p.paragraph_format.left_indent = Cm(config.toc_level2_left_indent_cm)
+        elif entry.level == 3:
+            p.paragraph_format.left_indent = Cm(config.toc_level3_left_indent_cm)
+        elif entry.level == 4:
+            p.paragraph_format.left_indent = Cm(config.toc_level4_left_indent_cm)
         p.paragraph_format.tab_stops.add_tab_stop(Cm(tab_pos_cm), alignment=WD_TAB_ALIGNMENT.RIGHT, leader=WD_TAB_LEADER.DOTS)
-        label_run = p.add_run(entry.label)
-        label_run.italic = False
-        _apply_run_fonts(label_run, east_asia=toc_east_asia, ascii_font=config.toc_level_font_ascii)
+        _add_hyperlink_to_bookmark(
+            p,
+            bookmark_name=entry.bookmark_name,
+            text=entry.label,
+            east_asia=toc_east_asia,
+            ascii_font=config.toc_level_font_ascii,
+            bold=(entry.level == 1),
+        )
 
         tab_run = p.add_run("\t")
+        tab_run.bold = False
         tab_run.italic = False
         _apply_run_fonts(tab_run, east_asia=toc_east_asia, ascii_font=config.toc_level_font_ascii)
-        _add_pageref_field(p, entry.bookmark_name, east_asia=toc_east_asia)
+        _add_pageref_field(p, entry.bookmark_name, east_asia=toc_east_asia, bold=(entry.level == 1))
 
 
 def _parse_markdown_to_ast(prepared: PreparedMarkdown) -> list[dict]:
@@ -1672,43 +2097,54 @@ def _parse_markdown_to_ast(prepared: PreparedMarkdown) -> list[dict]:
 
 def build_toc_entries(ast: list[dict], prepared: PreparedMarkdown) -> list[TocEntry]:
     entries: list[TocEntry] = []
-    chapter_no = 0
-    section_no = 0
+    seq_no = 0
 
-    def _clean_chapter_title(s: str) -> str:
-        original = s.strip()
-        cleaned = re.sub(r"^第\s*\d+\s*章", "", original).strip()
-        cleaned = re.sub(r"^第\d+章", "", cleaned).strip()
-        return cleaned or original
+    def _normalize_heading_label(text: str, *, level: int) -> str:
+        t = text.strip()
+        if level == 1:
+            return t
 
-    def _clean_section_title(s: str) -> str:
-        original = s.strip()
-        cleaned = re.sub(r"^第\s*\d+[．\.]\d+\s*节", "", original).strip()
-        cleaned = re.sub(r"^\d+[．\.]\d+\s*", "", cleaned).strip()
-        return cleaned or original
+        if level == 2:
+            m = re.match(r"^第\s*(\d+(?:[．\.]\d+){1})\s*节\s*(.+)$", t)
+            if m:
+                return f"第 {m.group(1).replace('．', '.')} 节 {m.group(2).strip()}"
+            m = re.match(r"^(\d+(?:[．\.]\d+){1})\s*(.+)$", t)
+            if m:
+                return f"第 {m.group(1).replace('．', '.')} 节 {m.group(2).strip()}"
+            return t
+
+        if level == 3:
+            m = re.match(r"^第\s*(\d+(?:[．\.]\d+){2})\s*节\s*(.+)$", t)
+            if m:
+                return f"第 {m.group(1).replace('．', '.')} 节 {m.group(2).strip()}"
+            m = re.match(r"^(\d+(?:[．\.]\d+){2})\s*(.+)$", t)
+            if m:
+                return f"第 {m.group(1).replace('．', '.')} 节 {m.group(2).strip()}"
+            return t
+
+        if level == 4:
+            m = re.match(r"^第\s*(\d+(?:[．\.]\d+){3})\s*节\s*(.+)$", t)
+            if m:
+                return f"第 {m.group(1).replace('．', '.')} 节 {m.group(2).strip()}"
+            m = re.match(r"^(\d+(?:[．\.]\d+){3})\s*(.+)$", t)
+            if m:
+                return f"第 {m.group(1).replace('．', '.')} 节 {m.group(2).strip()}"
+            return t
+
+        return t
 
     def _walk(nodes: list[dict]) -> None:
-        nonlocal chapter_no, section_no
+        nonlocal seq_no
         for token in nodes:
             t = token.get("type")
             if t == "heading":
                 level = int(token.get("level", 1))
-                if level not in (1, 2):
+                if level not in (1, 2, 3, 4):
                     continue
                 text = _extract_plain_text(token.get("children", []), prepared).strip()
-                if level == 1:
-                    chapter_no += 1
-                    section_no = 0
-                    title = _clean_chapter_title(text) or text
-                    label = f"第 {chapter_no} 章 {title}"
-                    entries.append(TocEntry(level=1, label=label, bookmark_name=f"toc_chap_{chapter_no}"))
-                else:
-                    if chapter_no == 0:
-                        chapter_no = 1
-                    section_no += 1
-                    title = _clean_section_title(text) or text
-                    label = f"第 {chapter_no}.{section_no} 节 {title}"
-                    entries.append(TocEntry(level=2, label=label, bookmark_name=f"toc_sec_{chapter_no}_{section_no}"))
+                seq_no += 1
+                label = _normalize_heading_label(text, level=level)
+                entries.append(TocEntry(level=level, label=label, bookmark_name=f"toc_{seq_no}"))
             else:
                 children = token.get("children")
                 if isinstance(children, list):
@@ -1784,6 +2220,12 @@ def _split_markdown_sections(raw: str) -> tuple[str, str, str, str, str]:
 
 def convert_markdown_to_docx(input_path: Path, output_path: Path, *, config: WordFormatConfig = DEFAULT_WORD_FORMAT) -> Path:
     raw = input_path.read_text(encoding="utf-8", errors="replace")
+    errors, warnings = _collect_markdown_issues(raw)
+    for w in warnings:
+        print(f"[WARN] {w}", file=sys.stderr)
+    if errors:
+        details = "\n".join(f"- {e}" for e in errors)
+        raise ValueError(f"Markdown 内容不合规，已停止转换：\n{details}")
     zh_title, zh_abstract_md, en_title, en_abstract_md, main_md = _split_markdown_sections(raw)
     base_path = input_path.parent.resolve()
 
@@ -1820,6 +2262,7 @@ def convert_markdown_to_docx(input_path: Path, output_path: Path, *, config: Wor
 
     doc.add_page_break()
     if en_abstract_md.strip():
+        _add_blank_line(doc)
         _add_blank_line(doc)
         en_title_text = en_title.strip() if en_title.strip() else "Entropy-Focused Group Relative Policy Optimization"
         en_title_p = doc.add_paragraph()
