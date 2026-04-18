@@ -29,6 +29,7 @@ from dataclasses import dataclass
 - 页面设置：页边距上 3.3cm、下 2.7cm、左 2.5cm、右 2.5cm；左侧装订线 0.5cm
 - 页眉页脚：页眉距 2.6cm、页脚距 2.0cm；页眉居中小五（9pt）宋体“苏州大学本科生毕业设计（论文）”并带横线；页脚居中页码
 - 代码块：Times New Roman 字体；代码字号 9pt；行号字号 8pt；行号栏宽 0.65cm
+- 参考文献：不首行缩进；按“[n]”分条；编号悬挂，正文对齐到统一缩进（1.2cm）；编号在悬挂区域内居中
 """
 
 
@@ -71,11 +72,14 @@ class WordFormatConfig:
     toc_level1_east_asia_font: str = "黑体"  # 目录中“章题目”中文字体：黑体（四号）
     toc_level2_east_asia_font: str = "宋体"  # 目录中“节题目”中文字体：宋体（四号）
     toc_level3_east_asia_font: str = "宋体"  # 目录中更深层级条目的中文字体（如有）
+    toc_level4_east_asia_font: str = "宋体"  # 目录中四级条目的中文字体（如有）
     toc_level_font_ascii: str = "Times New Roman"  # 目录条目外文字体
     toc_level1_size_pt: float = 14.0  # 目录章题目字号：四号=14pt
     toc_level2_size_pt: float = 14.0  # 目录节题目字号：四号=14pt
     toc_level3_size_pt: float = 14.0  # 目录更深层级字号：四号=14pt
     toc_level2_left_indent_cm: float = 0.74  # 目录中“节题目”左缩进（与正文首行缩进一致的常用值）
+    toc_level3_left_indent_cm: float = 1.48  # 目录中三级条目左缩进（cm）
+    toc_level4_left_indent_cm: float = 2.22  # 目录中四级条目左缩进（cm）
 
     margin_top_cm: float = 3.3  # 页边距：上 3.3cm
     margin_bottom_cm: float = 2.7  # 页边距：下 2.7cm
@@ -96,6 +100,8 @@ class WordFormatConfig:
     code_font_size_pt: float = 9.0  # 代码块字号（pt）
     code_line_number_font_size_pt: float = 8.0  # 代码块行号字号（pt）
     code_gutter_width_cm: float = 0.65  # 代码块行号栏宽度（cm）
+
+    references_hanging_indent_cm: float = 1.2  # 参考文献悬挂缩进（cm）：正文起始对齐位置；两位数编号建议加大以避免视觉不齐
 
 
 DEFAULT_WORD_FORMAT = WordFormatConfig()
