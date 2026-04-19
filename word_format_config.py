@@ -22,9 +22,10 @@ from dataclasses import dataclass
 本配置文件用于集中管理论文排版关键参数（按当前配置默认值归纳）：
 - 封面标题：中文小二（18pt）黑体；外文小二（18pt）Times New Roman
 - 摘要：摘要标题小三（15pt）黑体；摘要内容使用正文样式（小四宋体/Times New Roman）
-- 正文章节标题：标题加粗；章/节标题小三（15pt）黑体（Heading 1/2）
+- 正文章节标题：标题加粗；一级到四级标题小三（15pt）宋体（Heading 1/2/3/4）
+- 标题留白：通过标题段落的段前/段后各一行实现（不插入空白段落）
 - 正文：中文宋体、外文 Times New Roman；小四（12pt）；行距 1.5 倍；段前段后 0；首行缩进约 2 字符（0.74cm）
-- 目录标题：目录页顶部“目录”二字视为章节标题——小三（15pt）黑体加粗、居中
+- 目录标题：目录页顶部“目录”二字视为章节标题——四号（14pt）宋体加粗、居中
 - 目录条目：章题目四号（14pt）黑体；节题目四号（14pt）宋体；页码用“……”点引导连接（由代码使用制表位 + leader dots + PAGEREF 实现）
 - 页面设置：页边距上 3.3cm、下 2.7cm、左 2.5cm、右 2.5cm；左侧装订线 0.5cm
 - 页眉页脚：页眉距 2.6cm、页脚距 2.0cm；页眉居中小五（9pt）宋体“苏州大学本科生毕业设计（论文）”并带横线；页脚居中页码
@@ -51,7 +52,7 @@ class WordFormatConfig:
     abstract_heading_font_ascii: str = "Times New Roman"  # 摘要标题外文字体
     abstract_heading_size_pt: float = 15.0  # 摘要标题字号：小三=15pt（不影响摘要内容）
 
-    heading_east_asia_font: str = "黑体"  # 正文章节标题中文字体：黑体（标题加粗由样式设定）
+    heading_east_asia_font: str = "宋体"  # 正文章节标题中文字体：宋体（标题加粗由样式设定）
     heading_ascii_font: str = "Times New Roman"  # 正文章节标题外文字体：Times New Roman
     heading_1_size_pt: float = 15.0  # 章节题目字号：小三=15pt（对应“第X章 …”）
     heading_2_size_pt: float = 15.0  # 节题目字号：小三=15pt（对应“X.X …”）
@@ -59,9 +60,9 @@ class WordFormatConfig:
     heading_4_size_pt: float = 15.0  # 四级标题字号（如有需要可调整）
 
     toc_title_text: str = "目录"  # 目录标题文字（目录页顶部的“目录”二字）
-    toc_title_east_asia_font: str = "黑体"  # 目录标题中文字体：黑体（按章节标题要求）
+    toc_title_east_asia_font: str = "宋体"  # 目录标题中文字体：宋体
     toc_title_ascii_font: str = "Times New Roman"  # 目录标题外文字体
-    toc_title_size_pt: float = 15.0  # 目录标题字号：小三=15pt（视为章节标题）
+    toc_title_size_pt: float = 14.0  # 目录标题字号：四号=14pt（视为章节标题）
     toc_title_bold: bool = True  # 目录标题是否加粗
 
     toc_heading_text: str = "目录"  # Word 内置样式“TOC Heading”的文字（当前实现主要使用 toc_title_* 作为目录页标题）
