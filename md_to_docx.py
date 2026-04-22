@@ -165,10 +165,37 @@ def _apply_one_line_spacing_around_paragraph(
     before_lines: float = 1.0,
     after_lines: float = 1.0,
 ) -> None:
-    line_pt = float(config.body_font_size_pt) * float(config.body_line_spacing)
-    pf = paragraph.paragraph_format
-    pf.space_before = Pt(line_pt * before_lines)
-    pf.space_after = Pt(line_pt * after_lines)
+    p_pr = paragraph._p.get_or_add_pPr()
+    spacing = p_pr.find(qn("w:spacing"))
+    if spacing is None:
+        spacing = OxmlElement("w:spacing")
+        p_pr.append(spacing)
+
+    for attr in [
+        qn("w:before"),
+        qn("w:after"),
+        qn("w:beforeAutospacing"),
+        qn("w:afterAutospacing"),
+    ]:
+        if attr in spacing.attrib:
+            del spacing.attrib[attr]
+
+    spacing.set(qn("w:beforeLines"), str(int(round(float(before_lines) * 100))))
+    spacing.set(qn("w:afterLines"), str(int(round(float(after_lines) * 100))))
+
+
+def _clear_paragraph_first_line_indent(paragraph) -> None:
+    p_pr = paragraph._p.get_or_add_pPr()
+    ind = p_pr.find(qn("w:ind"))
+    if ind is None:
+        ind = OxmlElement("w:ind")
+        p_pr.append(ind)
+
+    for attr in [qn("w:firstLine"), qn("w:hanging"), qn("w:firstLineChars"), qn("w:hangingChars")]:
+        if attr in ind.attrib:
+            del ind.attrib[attr]
+
+    ind.set(qn("w:firstLineChars"), "0")
 
 
 def _remove_leading_empty_paragraphs(doc: Document) -> None:
@@ -1254,7 +1281,7 @@ def _render_table(
             cell.text = ""
             p = cell.paragraphs[0]
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.paragraph_format.first_line_indent = Cm(0)
+            _clear_paragraph_first_line_indent(p)
             p.paragraph_format.left_indent = Cm(0)
             p.paragraph_format.right_indent = Cm(0)
             p.paragraph_format.keep_together = True
@@ -1293,7 +1320,7 @@ def _render_table(
             cell.text = ""
             p = cell.paragraphs[0]
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.paragraph_format.first_line_indent = Cm(0)
+            _clear_paragraph_first_line_indent(p)
             p.paragraph_format.left_indent = Cm(0)
             p.paragraph_format.right_indent = Cm(0)
             p.paragraph_format.keep_together = True
@@ -1449,7 +1476,7 @@ def _render_references_from_inlines(
     items = _split_reference_items(raw_text)
     if not items:
         p = doc.add_paragraph()
-        p.paragraph_format.first_line_indent = Cm(0)
+        _clear_paragraph_first_line_indent(p)
         p.paragraph_format.left_indent = Cm(0)
         p.paragraph_format.space_before = Pt(0)
         p.paragraph_format.space_after = Pt(0)
@@ -1466,6 +1493,7 @@ def _render_references_from_inlines(
     hang_cm = float(config.references_hanging_indent_cm)
     for no, body in items:
         p = doc.add_paragraph()
+        _clear_paragraph_first_line_indent(p)
         p.paragraph_format.space_before = Pt(0)
         p.paragraph_format.space_after = Pt(0)
         p.paragraph_format.line_spacing = config.body_line_spacing
@@ -1674,7 +1702,7 @@ def _render_blocks(
                         caption_text = f"表{ctx.pending_table_no}：{rest}" if rest else f"表{ctx.pending_table_no}："
                         cap = doc.add_paragraph()
                         cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        cap.paragraph_format.first_line_indent = Cm(0)
+                        _clear_paragraph_first_line_indent(cap)
                         cap.paragraph_format.left_indent = Cm(0)
                         cap.paragraph_format.right_indent = Cm(0)
                         cap.paragraph_format.keep_together = True
@@ -1717,7 +1745,7 @@ def _render_blocks(
 
                     pic_p = doc.add_paragraph()
                     pic_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    pic_p.paragraph_format.first_line_indent = Cm(0)
+                    _clear_paragraph_first_line_indent(pic_p)
                     pic_p.paragraph_format.left_indent = Cm(0)
                     pic_p.paragraph_format.right_indent = Cm(0)
                     pic_p.paragraph_format.keep_together = True
@@ -1727,7 +1755,7 @@ def _render_blocks(
 
                     cap_p = doc.add_paragraph()
                     cap_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    cap_p.paragraph_format.first_line_indent = Cm(0)
+                    _clear_paragraph_first_line_indent(cap_p)
                     cap_p.paragraph_format.left_indent = Cm(0)
                     cap_p.paragraph_format.right_indent = Cm(0)
                     cap_p.paragraph_format.keep_together = True
@@ -1884,12 +1912,42 @@ def _set_style_font(style, *, east_asia: str, ascii_font: str, size_pt: float, b
     rfonts.set(qn("w:eastAsia"), east_asia)
 
 
-def _set_style_paragraph(style, *, line_spacing: float, space_before_pt: float, space_after_pt: float, first_line_indent_cm: Optional[float] = None) -> None:
+def _set_ppr_first_line_indent_chars(p_pr, *, chars: int) -> None:
+    ind = p_pr.find(qn("w:ind"))
+    if ind is None:
+        ind = OxmlElement("w:ind")
+        p_pr.append(ind)
+
+    for attr in [qn("w:firstLine"), qn("w:hanging"), qn("w:firstLineChars"), qn("w:hangingChars")]:
+        if attr in ind.attrib:
+            del ind.attrib[attr]
+
+    ind.set(qn("w:firstLineChars"), str(int(chars) * 100))
+
+
+def _set_style_first_line_indent_chars(style, *, chars: int) -> None:
+    if hasattr(style, "_element") and hasattr(style._element, "get_or_add_pPr"):
+        p_pr = style._element.get_or_add_pPr()
+        _set_ppr_first_line_indent_chars(p_pr, chars=chars)
+
+
+def _set_style_paragraph(
+    style,
+    *,
+    line_spacing: float,
+    space_before_pt: float,
+    space_after_pt: float,
+    first_line_indent_cm: Optional[float] = None,
+    first_line_indent_chars: Optional[int] = None,
+) -> None:
     pf = style.paragraph_format
     pf.line_spacing = line_spacing
     pf.space_before = Pt(space_before_pt)
     pf.space_after = Pt(space_after_pt)
-    if first_line_indent_cm is not None:
+    if first_line_indent_chars is not None:
+        pf.first_line_indent = None
+        _set_style_first_line_indent_chars(style, chars=first_line_indent_chars)
+    elif first_line_indent_cm is not None:
         pf.first_line_indent = Cm(first_line_indent_cm)
 
 
@@ -1905,7 +1963,7 @@ def _configure_document_styles(doc: Document, *, config: WordFormatConfig) -> No
         line_spacing=config.body_line_spacing,
         space_before_pt=0,
         space_after_pt=0,
-        first_line_indent_cm=config.body_first_line_indent_cm,
+        first_line_indent_chars=config.body_first_line_indent_chars,
     )
 
     if "Title" in doc.styles:
