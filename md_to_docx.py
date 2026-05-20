@@ -1116,9 +1116,10 @@ def _render_code_block(doc: Document, *, code_text: str, lang: str, ctx: Optiona
         code_cell = row.cells[1]
         _set_cell_shading(ln_cell, fill="F2F2F2")
         _set_cell_shading(code_cell, fill="FAFAFA")
-        _set_cell_horizontal_margins_twips(ln_cell, left=0, right=0)
+        _set_cell_horizontal_margins_twips(ln_cell, left=0, right=60)
 
         ln_p = ln_cell.paragraphs[0]
+        _clear_paragraph_first_line_indent(ln_p)
         ln_p.paragraph_format.first_line_indent = Cm(0)
         ln_p.paragraph_format.left_indent = Cm(0)
         ln_p.paragraph_format.right_indent = Cm(0)
@@ -1134,6 +1135,7 @@ def _render_code_block(doc: Document, *, code_text: str, lang: str, ctx: Optiona
         _apply_run_fonts(ln_run, east_asia=config.code_font_name, ascii_font=config.code_font_name)
 
         code_p = code_cell.paragraphs[0]
+        _clear_paragraph_first_line_indent(code_p)
         code_p.paragraph_format.first_line_indent = Cm(0)
         code_p.paragraph_format.left_indent = Cm(0)
         code_p.paragraph_format.right_indent = Cm(0)
@@ -1984,7 +1986,13 @@ def _configure_document_styles(doc: Document, *, config: WordFormatConfig) -> No
     ]:
         if name in doc.styles:
             _set_style_font(doc.styles[name], east_asia=east_asia, ascii_font=config.heading_ascii_font, size_pt=size, bold=bold)
-            _set_style_paragraph(doc.styles[name], line_spacing=config.body_line_spacing, space_before_pt=0, space_after_pt=after, first_line_indent_cm=None)
+            _set_style_paragraph(
+                doc.styles[name],
+                line_spacing=config.body_line_spacing,
+                space_before_pt=0,
+                space_after_pt=after,
+                first_line_indent_chars=0,
+            )
             pf = doc.styles[name].paragraph_format
             pf.alignment = WD_ALIGN_PARAGRAPH.CENTER if name == "Heading 1" else WD_ALIGN_PARAGRAPH.LEFT
             pf.keep_with_next = False
@@ -2003,7 +2011,7 @@ def _configure_document_styles(doc: Document, *, config: WordFormatConfig) -> No
             line_spacing=config.body_line_spacing,
             space_before_pt=0,
             space_after_pt=config.toc_heading_space_after_pt,
-            first_line_indent_cm=None,
+            first_line_indent_chars=0,
         )
 
     for toc_style, east_asia, size in [
@@ -2022,6 +2030,7 @@ def _configure_document_styles(doc: Document, *, config: WordFormatConfig) -> No
             bold=False,
         )
         _set_style_paragraph(doc.styles[toc_style], line_spacing=config.body_line_spacing, space_before_pt=0, space_after_pt=0, first_line_indent_cm=None)
+        _set_style_first_line_indent_chars(doc.styles[toc_style], chars=0)
 
 
 def _configure_section_layout(section, *, config: WordFormatConfig) -> None:
@@ -2293,6 +2302,7 @@ def convert_markdown_to_docx(input_path: Path, output_path: Path, *, config: Wor
 
     zh_title_p = doc.add_paragraph()
     zh_title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _clear_paragraph_first_line_indent(zh_title_p)
     _apply_one_line_spacing_around_paragraph(zh_title_p, config=config, before_lines=1.0, after_lines=1.0)
     zh_run = zh_title_p.add_run(zh_title)
     zh_run.bold = True
@@ -2302,6 +2312,7 @@ def convert_markdown_to_docx(input_path: Path, output_path: Path, *, config: Wor
 
     abs_heading = doc.add_paragraph()
     abs_heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _clear_paragraph_first_line_indent(abs_heading)
     _apply_one_line_spacing_around_paragraph(abs_heading, config=config, before_lines=1.0, after_lines=1.0)
     abs_run = abs_heading.add_run(config.abstract_heading_text_zh)
     abs_run.bold = True
@@ -2318,6 +2329,7 @@ def convert_markdown_to_docx(input_path: Path, output_path: Path, *, config: Wor
         en_title_p = doc.add_paragraph()
         en_title_p.paragraph_format.page_break_before = True
         en_title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _clear_paragraph_first_line_indent(en_title_p)
         _apply_one_line_spacing_around_paragraph(en_title_p, config=config, before_lines=1.0, after_lines=1.0)
         en_title_run = en_title_p.add_run(en_title_text)
         en_title_run.bold = True
@@ -2327,6 +2339,7 @@ def convert_markdown_to_docx(input_path: Path, output_path: Path, *, config: Wor
 
         en_heading = doc.add_paragraph()
         en_heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _clear_paragraph_first_line_indent(en_heading)
         _apply_one_line_spacing_around_paragraph(en_heading, config=config, before_lines=1.0, after_lines=1.0)
         en_abs_run = en_heading.add_run(config.abstract_heading_text_en)
         en_abs_run.bold = True
